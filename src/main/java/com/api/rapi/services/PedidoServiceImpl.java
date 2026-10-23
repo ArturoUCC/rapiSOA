@@ -8,6 +8,7 @@ import java.util.Optional;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.api.rapi.events.PedidoEventPublisher;
 import com.api.rapi.models.ClienteModel;
 import com.api.rapi.models.PagoModel;
 import com.api.rapi.models.PedidoModel;
@@ -25,17 +26,20 @@ public class PedidoServiceImpl implements PedidoService {
     private final ClienteRepository clienteRepository;
     private final RestauranteRepository restauranteRepository;
     private final PagoRepository pagoRepository;
+    private final PedidoEventPublisher eventPublisher;
 
     public PedidoServiceImpl(
             PedidoRepository pedidoRepository,
             ClienteRepository clienteRepository,
             RestauranteRepository restauranteRepository,
-            PagoRepository pagoRepository) {
+            PagoRepository pagoRepository,
+            PedidoEventPublisher eventPublisher) {
 
         this.pedidoRepository = pedidoRepository;
         this.clienteRepository = clienteRepository;
         this.restauranteRepository = restauranteRepository;
         this.pagoRepository = pagoRepository;
+        this.eventPublisher = eventPublisher;
     }
 
     @Override
@@ -91,13 +95,13 @@ public class PedidoServiceImpl implements PedidoService {
 
         if (!restaurante.isActivo() || !restaurante.isAbierto()) {
             throw new IllegalStateException(
-                    "El restaurante no está disponible");
+                    "El restaurante no esta disponible");
         }
 
         if (direccionEntrega == null ||
                 direccionEntrega.isBlank()) {
             throw new IllegalArgumentException(
-                    "La dirección de entrega es obligatoria");
+                    "La direccion de entrega es obligatoria");
         }
 
         PedidoModel pedido = new PedidoModel();
@@ -109,7 +113,11 @@ public class PedidoServiceImpl implements PedidoService {
         pedido.setTotal(BigDecimal.ZERO);
         pedido.setEstado("PendientePago");
 
-        return pedidoRepository.save(pedido);
+        PedidoModel guardado = pedidoRepository.save(pedido);
+
+        publicarEvento(guardado, "PEDIDO_CREADO");
+
+        return guardado;
     }
 
     @Override
@@ -120,13 +128,13 @@ public class PedidoServiceImpl implements PedidoService {
 
         if (!"PendientePago".equals(pedido.getEstado())) {
             throw new IllegalStateException(
-                    "El pedido no está pendiente de pago");
+                    "El pedido no esta pendiente de pago");
         }
 
         if (pedido.getTotal() == null ||
                 pedido.getTotal().compareTo(BigDecimal.ZERO) <= 0) {
             throw new IllegalStateException(
-                    "El pedido debe tener productos y un total válido");
+                    "El pedido debe tener productos y un total valido");
         }
 
         PagoModel pago = pagoRepository.findByPedidoId(pedidoId)
@@ -136,7 +144,7 @@ public class PedidoServiceImpl implements PedidoService {
 
         if (!"Confirmado".equals(pago.getEstado())) {
             throw new IllegalStateException(
-                    "El pago todavía no está confirmado");
+                    "El pago todavia no esta confirmado");
         }
 
         LocalDateTime ahora = LocalDateTime.now();
@@ -144,7 +152,11 @@ public class PedidoServiceImpl implements PedidoService {
         pedido.setEstado("PendienteAceptacion");
         pedido.setFechaLimiteAceptacion(ahora.plusMinutes(5));
 
-        return pedidoRepository.save(pedido);
+        PedidoModel guardado = pedidoRepository.save(pedido);
+
+        publicarEvento(guardado, "PAGO_CONFIRMADO");
+
+        return guardado;
     }
 
     @Override
@@ -158,26 +170,35 @@ public class PedidoServiceImpl implements PedidoService {
 
         if (!"PendienteAceptacion".equals(pedido.getEstado())) {
             throw new IllegalStateException(
-                    "El pedido no está pendiente de aceptación");
+                    "El pedido no esta pendiente de aceptacion");
         }
 
         if (pedido.getFechaLimiteAceptacion() == null) {
             throw new IllegalStateException(
-                    "El pedido no tiene fecha límite de aceptación");
+                    "El pedido no tiene fecha limite de aceptacion");
         }
 
         LocalDateTime ahora = LocalDateTime.now();
 
         if (!ahora.isBefore(pedido.getFechaLimiteAceptacion())) {
+
             cancelarConReembolsoPendiente(pedido);
 
-            return pedidoRepository.save(pedido);
+            PedidoModel guardado = pedidoRepository.save(pedido);
+
+            publicarEvento(guardado, "PEDIDO_CANCELADO");
+
+            return guardado;
         }
 
         pedido.setEstado("Aceptado");
         pedido.setFechaAceptacion(ahora);
 
-        return pedidoRepository.save(pedido);
+        PedidoModel guardado = pedidoRepository.save(pedido);
+
+        publicarEvento(guardado, "PEDIDO_ACEPTADO");
+
+        return guardado;
     }
 
     @Override
@@ -191,14 +212,18 @@ public class PedidoServiceImpl implements PedidoService {
 
         if (!"PendienteAceptacion".equals(pedido.getEstado())) {
             throw new IllegalStateException(
-                    "Solo se pueden rechazar pedidos pendientes de aceptación");
+                    "Solo se pueden rechazar pedidos pendientes de aceptacion");
         }
 
         cancelarConReembolsoPendiente(pedido);
 
         pedido.setEstado("Rechazado");
 
-        return pedidoRepository.save(pedido);
+        PedidoModel guardado = pedidoRepository.save(pedido);
+
+        publicarEvento(guardado, "PEDIDO_RECHAZADO");
+
+        return guardado;
     }
 
     @Override
@@ -208,19 +233,20 @@ public class PedidoServiceImpl implements PedidoService {
 
         PedidoModel pedido = obtenerPedido(pedidoId);
 
-        // Los estados de entrega serán administrados
-        // posteriormente por EntregaService.
-
         if ("Aceptado".equals(pedido.getEstado()) &&
                 "EnPreparacion".equals(nuevoEstado)) {
 
             pedido.setEstado("EnPreparacion");
 
-            return pedidoRepository.save(pedido);
+            PedidoModel guardado = pedidoRepository.save(pedido);
+
+            publicarEvento(guardado, "PEDIDO_EN_PREPARACION");
+
+            return guardado;
         }
 
         throw new IllegalStateException(
-                "No está permitida esta transición de estado");
+                "No esta permitida esta transicion de estado");
     }
 
     @Override
@@ -230,13 +256,25 @@ public class PedidoServiceImpl implements PedidoService {
         PedidoModel pedido = obtenerPedido(pedidoId);
 
         if ("PendientePago".equals(pedido.getEstado())) {
+
             pedido.setEstado("Cancelado");
-            return pedidoRepository.save(pedido);
+
+            PedidoModel guardado = pedidoRepository.save(pedido);
+
+            publicarEvento(guardado, "PEDIDO_CANCELADO");
+
+            return guardado;
         }
 
         if ("PendienteAceptacion".equals(pedido.getEstado())) {
+
             cancelarConReembolsoPendiente(pedido);
-            return pedidoRepository.save(pedido);
+
+            PedidoModel guardado = pedidoRepository.save(pedido);
+
+            publicarEvento(guardado, "PEDIDO_CANCELADO");
+
+            return guardado;
         }
 
         throw new IllegalStateException(
@@ -275,7 +313,9 @@ public class PedidoServiceImpl implements PedidoService {
 
                 cancelarConReembolsoPendiente(pedido);
 
-                pedidoRepository.save(pedido);
+                PedidoModel guardado = pedidoRepository.save(pedido);
+
+                publicarEvento(guardado, "PEDIDO_CANCELADO");
             }
         }
     }
@@ -314,5 +354,17 @@ public class PedidoServiceImpl implements PedidoService {
         }
 
         pedido.setEstado("Cancelado");
+    }
+
+    private void publicarEvento(
+            PedidoModel pedido,
+            String tipoEvento) {
+
+        eventPublisher.publicarEvento(
+                pedido.getId(),
+                pedido.getRestaurante().getId(),
+                tipoEvento,
+                pedido.getEstado()
+        );
     }
 }

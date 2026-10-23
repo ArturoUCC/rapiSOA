@@ -27,6 +27,11 @@ public class RestauranteModel {
     private boolean abierto;
 
     private boolean activo;
+    
+    private Double latitud;
+
+    private Double longitud;
+
 
     public RestauranteModel() {
     }
@@ -107,4 +112,22 @@ public class RestauranteModel {
     public void setActivo(boolean activo) {
         this.activo = activo;
     }
+
+    
+    public Double getLatitud() {
+        return latitud;
+    }
+
+    public void setLatitud(Double latitud) {
+        this.latitud = latitud;
+    }
+
+    public Double getLongitud() {
+        return longitud;
+    }
+
+    public void setLongitud(Double longitud) {
+        this.longitud = longitud;
+    }
+
 }

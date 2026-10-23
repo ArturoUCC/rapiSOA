@@ -7,6 +7,7 @@ import java.util.Optional;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.api.rapi.events.PedidoEventPublisher;
 import com.api.rapi.models.EntregaModel;
 import com.api.rapi.models.PedidoModel;
 import com.api.rapi.models.RepartidorModel;
@@ -22,17 +23,20 @@ public class EntregaServiceImpl implements EntregaService {
     private final PedidoRepository pedidoRepository;
     private final RepartidorRepository repartidorRepository;
     private final RepartidorService repartidorService;
+    private final PedidoEventPublisher eventPublisher;
 
     public EntregaServiceImpl(
             EntregaRepository entregaRepository,
             PedidoRepository pedidoRepository,
             RepartidorRepository repartidorRepository,
-            RepartidorService repartidorService) {
+            RepartidorService repartidorService,
+            PedidoEventPublisher eventPublisher) {
 
         this.entregaRepository = entregaRepository;
         this.pedidoRepository = pedidoRepository;
         this.repartidorRepository = repartidorRepository;
         this.repartidorService = repartidorService;
+        this.eventPublisher = eventPublisher;
     }
 
     @Override
@@ -69,7 +73,7 @@ public class EntregaServiceImpl implements EntregaService {
         if (!"Aceptado".equals(pedido.getEstado()) &&
                 !"EnPreparacion".equals(pedido.getEstado())) {
             throw new IllegalStateException(
-                    "El pedido debe estar aceptado o en preparación");
+                    "El pedido debe estar aceptado o en preparacion");
         }
 
         if (entregaRepository.existsByPedidoId(pedidoId)) {
@@ -78,11 +82,14 @@ public class EntregaServiceImpl implements EntregaService {
         }
 
         EntregaModel entrega = new EntregaModel();
-
         entrega.setPedido(pedido);
         entrega.setEstado("PendienteAsignacion");
 
-        return entregaRepository.save(entrega);
+        EntregaModel guardada = entregaRepository.save(entrega);
+
+        publicarEvento(pedido, "ENTREGA_CREADA");
+
+        return guardada;
     }
 
     @Override
@@ -92,18 +99,18 @@ public class EntregaServiceImpl implements EntregaService {
         EntregaModel entrega = obtenerEntrega(entregaId);
         validarPendienteAsignacion(entrega);
 
-        // Para esta versión se toma la ubicación del repartidor
-        // como referencia de búsqueda. Más adelante podremos
-        // utilizar las coordenadas reales del restaurante.
+        PedidoModel pedido = entrega.getPedido();
+
+        Double latitud = pedido.getRestaurante().getLatitud();
+        Double longitud = pedido.getRestaurante().getLongitud();
+
+        validarCoordenadas(latitud, longitud);
+
         RepartidorModel repartidor = repartidorService
-                .obtenerRepartidoresDisponibles()
-                .stream()
-                .filter(r -> r.getLatitud() != null &&
-                             r.getLongitud() != null)
-                .findFirst()
+                .buscarRepartidorMasCercano(latitud, longitud)
                 .orElseThrow(() ->
                         new IllegalStateException(
-                                "No hay repartidores disponibles con ubicación"));
+                                "No hay repartidores disponibles"));
 
         return asignarRepartidorManual(entregaId, repartidor.getId());
     }
@@ -123,7 +130,7 @@ public class EntregaServiceImpl implements EntregaService {
 
         if (!repartidor.isActivo() || !repartidor.isDisponible()) {
             throw new IllegalStateException(
-                    "El repartidor no está activo o disponible");
+                    "El repartidor no esta activo o disponible");
         }
 
         repartidor.setDisponible(false);
@@ -135,7 +142,11 @@ public class EntregaServiceImpl implements EntregaService {
         entrega.setLatitudActual(repartidor.getLatitud());
         entrega.setLongitudActual(repartidor.getLongitud());
 
-        return entregaRepository.save(entrega);
+        EntregaModel guardada = entregaRepository.save(entrega);
+
+        publicarEvento(entrega.getPedido(), "REPARTIDOR_ASIGNADO");
+
+        return guardada;
     }
 
     @Override
@@ -152,7 +163,11 @@ public class EntregaServiceImpl implements EntregaService {
         entrega.setEstado("Recogida");
         entrega.setFechaRecogida(LocalDateTime.now());
 
-        return entregaRepository.save(entrega);
+        EntregaModel guardada = entregaRepository.save(entrega);
+
+        publicarEvento(entrega.getPedido(), "PEDIDO_RECOGIDO");
+
+        return guardada;
     }
 
     @Override
@@ -170,10 +185,13 @@ public class EntregaServiceImpl implements EntregaService {
 
         PedidoModel pedido = entrega.getPedido();
         pedido.setEstado("EnCamino");
-
         pedidoRepository.save(pedido);
 
-        return entregaRepository.save(entrega);
+        EntregaModel guardada = entregaRepository.save(entrega);
+
+        publicarEvento(pedido, "PEDIDO_EN_CAMINO");
+
+        return guardada;
     }
 
     @Override
@@ -194,12 +212,18 @@ public class EntregaServiceImpl implements EntregaService {
         entrega.setLongitudActual(longitud);
 
         RepartidorModel repartidor = entrega.getRepartidor();
-
         repartidor.setLatitud(latitud);
         repartidor.setLongitud(longitud);
+
         repartidorRepository.save(repartidor);
 
-        return entregaRepository.save(entrega);
+        EntregaModel guardada = entregaRepository.save(entrega);
+
+        publicarEvento(
+                entrega.getPedido(),
+                "UBICACION_ACTUALIZADA");
+
+        return guardada;
     }
 
     @Override
@@ -221,13 +245,18 @@ public class EntregaServiceImpl implements EntregaService {
         PedidoModel pedido = entrega.getPedido();
         pedido.setEstado("Entregado");
         pedido.setFechaEntrega(ahora);
+
         pedidoRepository.save(pedido);
 
         RepartidorModel repartidor = entrega.getRepartidor();
         repartidor.setDisponible(true);
         repartidorRepository.save(repartidor);
 
-        return entregaRepository.save(entrega);
+        EntregaModel guardada = entregaRepository.save(entrega);
+
+        publicarEvento(pedido, "PEDIDO_ENTREGADO");
+
+        return guardada;
     }
 
     private PedidoModel obtenerPedido(Long id) {
@@ -245,20 +274,35 @@ public class EntregaServiceImpl implements EntregaService {
     }
 
     private void validarPendienteAsignacion(EntregaModel entrega) {
+
         if (!"PendienteAsignacion".equals(entrega.getEstado())) {
             throw new IllegalStateException(
-                    "La entrega no está pendiente de asignación");
+                    "La entrega no esta pendiente de asignacion");
         }
     }
 
-    private void validarCoordenadas(Double latitud, Double longitud) {
+    private void validarCoordenadas(
+            Double latitud, Double longitud) {
+
         if (latitud == null || longitud == null ||
                 !Double.isFinite(latitud) ||
                 !Double.isFinite(longitud) ||
                 latitud < -90 || latitud > 90 ||
                 longitud < -180 || longitud > 180) {
+
             throw new IllegalArgumentException(
-                    "Las coordenadas no son válidas");
+                    "Las coordenadas no son validas");
         }
+    }
+
+    private void publicarEvento(
+            PedidoModel pedido, String tipoEvento) {
+
+        eventPublisher.publicarEvento(
+                pedido.getId(),
+                pedido.getRestaurante().getId(),
+                tipoEvento,
+                pedido.getEstado()
+        );
     }
 }

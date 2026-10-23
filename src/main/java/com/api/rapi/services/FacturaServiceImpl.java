@@ -5,10 +5,12 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.api.rapi.adapters.SistemaFacturacionLegacyAdapter;
 import com.api.rapi.models.FacturaModel;
 import com.api.rapi.models.PedidoModel;
 import com.api.rapi.repositories.FacturaRepository;
@@ -22,17 +24,23 @@ public class FacturaServiceImpl implements FacturaService {
     private final PedidoRepository pedidoRepository;
     private final PagoRepository pagoRepository;
 
+    private final ObjectProvider<SistemaFacturacionLegacyAdapter>
+            adaptadorProvider;
+
     @Value("${rapi.facturacion.modo-pruebas:false}")
     private boolean modoPruebas;
 
     public FacturaServiceImpl(
             FacturaRepository facturaRepository,
             PedidoRepository pedidoRepository,
-            PagoRepository pagoRepository) {
+            PagoRepository pagoRepository,
+            ObjectProvider<SistemaFacturacionLegacyAdapter>
+                    adaptadorProvider) {
 
         this.facturaRepository = facturaRepository;
         this.pedidoRepository = pedidoRepository;
         this.pagoRepository = pagoRepository;
+        this.adaptadorProvider = adaptadorProvider;
     }
 
     @Override
@@ -92,17 +100,18 @@ public class FacturaServiceImpl implements FacturaService {
 
         if (razonSocial == null || razonSocial.isBlank()) {
             throw new IllegalArgumentException(
-                    "La razón social es obligatoria");
+                    "La razon social es obligatoria");
         }
 
         if (correoFacturacion == null ||
                 correoFacturacion.isBlank()) {
             throw new IllegalArgumentException(
-                    "El correo de facturación es obligatorio");
+                    "El correo de facturacion es obligatorio");
         }
 
         boolean pagoConfirmado = pagoRepository
-                .existsByPedidoIdAndEstado(pedidoId, "Confirmado");
+                .existsByPedidoIdAndEstado(
+                        pedidoId, "Confirmado");
 
         if (!pagoConfirmado) {
             throw new IllegalStateException(
@@ -112,15 +121,17 @@ public class FacturaServiceImpl implements FacturaService {
         if (pedido.getTotal() == null ||
                 pedido.getTotal().compareTo(BigDecimal.ZERO) <= 0) {
             throw new IllegalStateException(
-                    "El pedido debe tener un total válido");
+                    "El pedido debe tener un total valido");
         }
 
         FacturaModel factura = new FacturaModel();
 
         factura.setPedido(pedido);
-        factura.setRfcReceptor(rfcReceptor.trim().toUpperCase());
+        factura.setRfcReceptor(
+                rfcReceptor.trim().toUpperCase());
         factura.setRazonSocial(razonSocial.trim());
-        factura.setCorreoFacturacion(correoFacturacion.trim());
+        factura.setCorreoFacturacion(
+                correoFacturacion.trim());
         factura.setMontoTotal(pedido.getTotal());
         factura.setEstado("Solicitada");
         factura.setFechaSolicitud(LocalDateTime.now());
@@ -132,17 +143,27 @@ public class FacturaServiceImpl implements FacturaService {
     @Transactional
     public FacturaModel procesarFactura(Long facturaId) {
 
+        SistemaFacturacionLegacyAdapter adaptador =
+                obtenerAdaptadorPruebas();
+
         FacturaModel factura = obtenerFactura(facturaId);
 
         if (!"Solicitada".equals(factura.getEstado())) {
             throw new IllegalStateException(
-                    "La factura no está pendiente de procesamiento");
+                    "La factura no esta pendiente de procesamiento");
         }
 
-        factura.setEstado("EnProceso");
+        String referenciaExterna =
+                adaptador.solicitarEmision(
+                        factura.getRfcReceptor(),
+                        factura.getRazonSocial(),
+                        factura.getCorreoFacturacion(),
+                        factura.getMontoTotal(),
+                        factura.getPedido().getId()
+                );
 
-        // Pendiente: enviar la solicitud al sistema
-        // de facturación heredado mediante un adaptador.
+        factura.setReferenciaExterna(referenciaExterna);
+        factura.setEstado("EnProceso");
 
         return facturaRepository.save(factura);
     }
@@ -154,41 +175,48 @@ public class FacturaServiceImpl implements FacturaService {
             String folioFiscal,
             String referenciaExterna) {
 
-        verificarModoPruebas();
+        SistemaFacturacionLegacyAdapter adaptador =
+                obtenerAdaptadorPruebas();
 
         FacturaModel factura = obtenerFactura(facturaId);
 
         if (!"EnProceso".equals(factura.getEstado())) {
             throw new IllegalStateException(
-                    "La factura no está en proceso");
-        }
-
-        if (folioFiscal == null || folioFiscal.isBlank()) {
-            throw new IllegalArgumentException(
-                    "El folio fiscal es obligatorio");
+                    "La factura no esta en proceso");
         }
 
         if (referenciaExterna == null ||
-                referenciaExterna.isBlank()) {
-            throw new IllegalArgumentException(
-                    "La referencia externa es obligatoria");
-        }
-
-        String folio = folioFiscal.trim();
-        String referencia = referenciaExterna.trim();
-
-        Optional<FacturaModel> facturaExistente =
-                facturaRepository.findByFolioFiscal(folio);
-
-        if (facturaExistente.isPresent() &&
-                !facturaExistente.get().getId().equals(facturaId)) {
-
+                referenciaExterna.isBlank() ||
+                !referenciaExterna.trim().equals(
+                        factura.getReferenciaExterna())) {
             throw new IllegalStateException(
-                    "El folio fiscal ya está registrado");
+                    "La referencia externa no coincide");
         }
 
-        factura.setFolioFiscal(folio);
-        factura.setReferenciaExterna(referencia);
+        if (!adaptador.verificarEmision(referenciaExterna)) {
+            throw new IllegalStateException(
+                    "El sistema heredado no ha emitido la factura");
+        }
+
+        String folioVerificado =
+                adaptador.obtenerFolioFiscal(referenciaExterna);
+
+        if (folioFiscal == null ||
+                !folioVerificado.equals(folioFiscal.trim())) {
+            throw new IllegalStateException(
+                    "El folio no coincide con el sistema heredado");
+        }
+
+        Optional<FacturaModel> existente =
+                facturaRepository.findByFolioFiscal(folioVerificado);
+
+        if (existente.isPresent() &&
+                !existente.get().getId().equals(facturaId)) {
+            throw new IllegalStateException(
+                    "El folio ya esta registrado");
+        }
+
+        factura.setFolioFiscal(folioVerificado);
         factura.setFechaEmision(LocalDateTime.now());
         factura.setEstado("Emitida");
 
@@ -199,7 +227,7 @@ public class FacturaServiceImpl implements FacturaService {
     @Transactional
     public FacturaModel marcarFacturaConError(Long facturaId) {
 
-        verificarModoPruebas();
+        obtenerAdaptadorPruebas();
 
         FacturaModel factura = obtenerFactura(facturaId);
 
@@ -222,12 +250,23 @@ public class FacturaServiceImpl implements FacturaService {
                                 "La factura no existe"));
     }
 
-    private void verificarModoPruebas() {
+    private SistemaFacturacionLegacyAdapter
+            obtenerAdaptadorPruebas() {
 
         if (!modoPruebas) {
             throw new IllegalStateException(
-                    "La confirmación simulada de facturas "
-                    + "está deshabilitada");
+                    "La facturacion simulada esta deshabilitada");
         }
+
+        SistemaFacturacionLegacyAdapter adaptador =
+                adaptadorProvider.getIfAvailable();
+
+        if (adaptador == null) {
+            throw new IllegalStateException(
+                    "No existe un adaptador de facturacion activo. "
+                    + "Verifica el perfil local");
+        }
+
+        return adaptador;
     }
 }

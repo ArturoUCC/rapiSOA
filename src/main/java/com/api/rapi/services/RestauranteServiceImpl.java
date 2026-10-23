@@ -38,6 +38,7 @@ public class RestauranteServiceImpl implements RestauranteService {
     @Override
     public List<RestauranteModel> buscarRestaurantesPorTipoComida(
             String tipoComida) {
+
         return restauranteRepository
                 .findByTipoComidaContainingIgnoreCase(tipoComida);
     }
@@ -75,9 +76,15 @@ public class RestauranteServiceImpl implements RestauranteService {
                     "El tipo de comida es obligatorio");
         }
 
+        validarCoordenadas(
+                restaurante.getLatitud(),
+                restaurante.getLongitud()
+        );
+
         restaurante.setId(null);
         restaurante.setNombre(restaurante.getNombre().trim());
         restaurante.setDireccion(restaurante.getDireccion().trim());
+        restaurante.setTipoComida(restaurante.getTipoComida().trim());
 
         return restauranteRepository.save(restaurante);
     }
@@ -110,11 +117,20 @@ public class RestauranteServiceImpl implements RestauranteService {
                     "El tipo de comida es obligatorio");
         }
 
+        validarCoordenadas(
+                datos.getLatitud(),
+                datos.getLongitud()
+        );
+
         restaurante.setNombre(datos.getNombre().trim());
         restaurante.setDireccion(datos.getDireccion().trim());
         restaurante.setTelefono(datos.getTelefono());
         restaurante.setCorreo(datos.getCorreo());
         restaurante.setTipoComida(datos.getTipoComida().trim());
+
+        // Actualizar coordenadas del restaurante
+        restaurante.setLatitud(datos.getLatitud());
+        restaurante.setLongitud(datos.getLongitud());
 
         return restauranteRepository.save(restaurante);
     }
@@ -167,5 +183,25 @@ public class RestauranteServiceImpl implements RestauranteService {
                                 "El restaurante no existe"));
 
         restauranteRepository.delete(restaurante);
+    }
+
+    // Validar coordenadas geograficas
+    private void validarCoordenadas(
+            Double latitud,
+            Double longitud) {
+
+        if (latitud == null && longitud == null) {
+            return;
+        }
+
+        if (latitud == null || longitud == null ||
+                !Double.isFinite(latitud) ||
+                !Double.isFinite(longitud) ||
+                latitud < -90 || latitud > 90 ||
+                longitud < -180 || longitud > 180) {
+
+            throw new IllegalArgumentException(
+                    "Las coordenadas del restaurante no son validas");
+        }
     }
 }
