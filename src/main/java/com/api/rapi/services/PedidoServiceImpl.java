@@ -9,13 +9,13 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.api.rapi.events.PedidoEventPublisher;
+import com.api.rapi.exceptions.RecursoNoEncontradoException;
+
 import com.api.rapi.models.ClienteModel;
-import com.api.rapi.models.PagoModel;
 import com.api.rapi.models.PedidoModel;
 import com.api.rapi.models.RestauranteModel;
 
 import com.api.rapi.repositories.ClienteRepository;
-import com.api.rapi.repositories.PagoRepository;
 import com.api.rapi.repositories.PedidoRepository;
 import com.api.rapi.repositories.RestauranteRepository;
 
@@ -25,20 +25,20 @@ public class PedidoServiceImpl implements PedidoService {
     private final PedidoRepository pedidoRepository;
     private final ClienteRepository clienteRepository;
     private final RestauranteRepository restauranteRepository;
-    private final PagoRepository pagoRepository;
+    private final PagoEstadoService pagoEstadoService;
     private final PedidoEventPublisher eventPublisher;
 
     public PedidoServiceImpl(
             PedidoRepository pedidoRepository,
             ClienteRepository clienteRepository,
             RestauranteRepository restauranteRepository,
-            PagoRepository pagoRepository,
+            PagoEstadoService pagoEstadoService,
             PedidoEventPublisher eventPublisher) {
 
         this.pedidoRepository = pedidoRepository;
         this.clienteRepository = clienteRepository;
         this.restauranteRepository = restauranteRepository;
-        this.pagoRepository = pagoRepository;
+        this.pagoEstadoService = pagoEstadoService;
         this.eventPublisher = eventPublisher;
     }
 
@@ -54,25 +54,56 @@ public class PedidoServiceImpl implements PedidoService {
 
     @Override
     public List<PedidoModel> buscarPedidosPorCliente(Long clienteId) {
+
+        if (!clienteRepository.existsById(clienteId)) {
+            throw new RecursoNoEncontradoException(
+                    "Cliente", clienteId);
+        }
+
         return pedidoRepository.findByClienteId(clienteId);
     }
 
     @Override
-    public List<PedidoModel> buscarPedidosPorRestaurante(Long restauranteId) {
+    public List<PedidoModel> buscarPedidosPorRestaurante(
+            Long restauranteId) {
+
+        if (!restauranteRepository.existsById(restauranteId)) {
+            throw new RecursoNoEncontradoException(
+                    "Restaurante", restauranteId);
+        }
+
         return pedidoRepository.findByRestauranteId(restauranteId);
     }
 
     @Override
     public List<PedidoModel> buscarPedidosPorEstado(String estado) {
-        return pedidoRepository.findByEstado(estado);
+
+        if (estado == null || estado.isBlank()) {
+            throw new IllegalArgumentException(
+                    "El estado del pedido es obligatorio");
+        }
+
+        return pedidoRepository.findByEstado(estado.trim());
     }
 
     @Override
     public List<PedidoModel> buscarPedidosPorRestauranteYEstado(
-            Long restauranteId, String estado) {
+            Long restauranteId,
+            String estado) {
+
+        if (!restauranteRepository.existsById(restauranteId)) {
+            throw new RecursoNoEncontradoException(
+                    "Restaurante", restauranteId);
+        }
+
+        if (estado == null || estado.isBlank()) {
+            throw new IllegalArgumentException(
+                    "El estado del pedido es obligatorio");
+        }
 
         return pedidoRepository.findByRestauranteIdAndEstado(
-                restauranteId, estado);
+                restauranteId,
+                estado.trim());
     }
 
     @Override
@@ -84,14 +115,14 @@ public class PedidoServiceImpl implements PedidoService {
 
         ClienteModel cliente = clienteRepository.findById(clienteId)
                 .orElseThrow(() ->
-                        new IllegalArgumentException(
-                                "El cliente no existe"));
+                        new RecursoNoEncontradoException(
+                                "Cliente", clienteId));
 
         RestauranteModel restaurante = restauranteRepository
                 .findById(restauranteId)
                 .orElseThrow(() ->
-                        new IllegalArgumentException(
-                                "El restaurante no existe"));
+                        new RecursoNoEncontradoException(
+                                "Restaurante", restauranteId));
 
         if (!restaurante.isActivo() || !restaurante.isAbierto()) {
             throw new IllegalStateException(
@@ -137,20 +168,16 @@ public class PedidoServiceImpl implements PedidoService {
                     "El pedido debe tener productos y un total valido");
         }
 
-        PagoModel pago = pagoRepository.findByPedidoId(pedidoId)
-                .orElseThrow(() ->
-                        new IllegalStateException(
-                                "No existe un pago para este pedido"));
-
-        if (!"Confirmado".equals(pago.getEstado())) {
-            throw new IllegalStateException(
-                    "El pago todavia no esta confirmado");
-        }
+        // La validacion del pago pertenece a PagoEstadoService
+        pagoEstadoService.validarPagoConfirmado(
+                pedidoId,
+                pedido.getTotal());
 
         LocalDateTime ahora = LocalDateTime.now();
 
         pedido.setEstado("PendienteAceptacion");
-        pedido.setFechaLimiteAceptacion(ahora.plusMinutes(5));
+        pedido.setFechaLimiteAceptacion(
+                ahora.plusMinutes(5));
 
         PedidoModel guardado = pedidoRepository.save(pedido);
 
@@ -162,7 +189,8 @@ public class PedidoServiceImpl implements PedidoService {
     @Override
     @Transactional
     public PedidoModel aceptarPedido(
-            Long pedidoId, Long restauranteId) {
+            Long pedidoId,
+            Long restauranteId) {
 
         PedidoModel pedido = obtenerPedido(pedidoId);
 
@@ -180,7 +208,8 @@ public class PedidoServiceImpl implements PedidoService {
 
         LocalDateTime ahora = LocalDateTime.now();
 
-        if (!ahora.isBefore(pedido.getFechaLimiteAceptacion())) {
+        if (!ahora.isBefore(
+                pedido.getFechaLimiteAceptacion())) {
 
             cancelarConReembolsoPendiente(pedido);
 
@@ -204,7 +233,8 @@ public class PedidoServiceImpl implements PedidoService {
     @Override
     @Transactional
     public PedidoModel rechazarPedido(
-            Long pedidoId, Long restauranteId) {
+            Long pedidoId,
+            Long restauranteId) {
 
         PedidoModel pedido = obtenerPedido(pedidoId);
 
@@ -212,11 +242,11 @@ public class PedidoServiceImpl implements PedidoService {
 
         if (!"PendienteAceptacion".equals(pedido.getEstado())) {
             throw new IllegalStateException(
-                    "Solo se pueden rechazar pedidos pendientes de aceptacion");
+                    "Solo se pueden rechazar pedidos "
+                    + "pendientes de aceptacion");
         }
 
         cancelarConReembolsoPendiente(pedido);
-
         pedido.setEstado("Rechazado");
 
         PedidoModel guardado = pedidoRepository.save(pedido);
@@ -229,12 +259,18 @@ public class PedidoServiceImpl implements PedidoService {
     @Override
     @Transactional
     public PedidoModel cambiarEstadoPedido(
-            Long pedidoId, String nuevoEstado) {
+            Long pedidoId,
+            String nuevoEstado) {
 
         PedidoModel pedido = obtenerPedido(pedidoId);
 
+        if (nuevoEstado == null || nuevoEstado.isBlank()) {
+            throw new IllegalArgumentException(
+                    "El nuevo estado es obligatorio");
+        }
+
         if ("Aceptado".equals(pedido.getEstado()) &&
-                "EnPreparacion".equals(nuevoEstado)) {
+                "EnPreparacion".equals(nuevoEstado.trim())) {
 
             pedido.setEstado("EnPreparacion");
 
@@ -308,14 +344,18 @@ public class PedidoServiceImpl implements PedidoService {
         for (PedidoModel pedido : vencidos) {
 
             if ("PendienteAceptacion".equals(pedido.getEstado())
+                    && pedido.getFechaLimiteAceptacion() != null
                     && !ahora.isBefore(
                             pedido.getFechaLimiteAceptacion())) {
 
                 cancelarConReembolsoPendiente(pedido);
 
-                PedidoModel guardado = pedidoRepository.save(pedido);
+                PedidoModel guardado =
+                        pedidoRepository.save(pedido);
 
-                publicarEvento(guardado, "PEDIDO_CANCELADO");
+                publicarEvento(
+                        guardado,
+                        "PEDIDO_CANCELADO");
             }
         }
     }
@@ -324,15 +364,18 @@ public class PedidoServiceImpl implements PedidoService {
 
         return pedidoRepository.findById(id)
                 .orElseThrow(() ->
-                        new IllegalArgumentException(
-                                "El pedido no existe"));
+                        new RecursoNoEncontradoException(
+                                "Pedido", id));
     }
 
     private void validarRestaurantePedido(
-            PedidoModel pedido, Long restauranteId) {
+            PedidoModel pedido,
+            Long restauranteId) {
 
         if (restauranteId == null ||
-                !pedido.getRestaurante().getId().equals(restauranteId)) {
+                !pedido.getRestaurante()
+                        .getId()
+                        .equals(restauranteId)) {
 
             throw new IllegalArgumentException(
                     "El pedido no pertenece a este restaurante");
@@ -342,16 +385,9 @@ public class PedidoServiceImpl implements PedidoService {
     private void cancelarConReembolsoPendiente(
             PedidoModel pedido) {
 
-        PagoModel pago = pagoRepository
-                .findByPedidoId(pedido.getId())
-                .orElse(null);
-
-        if (pago != null &&
-                "Confirmado".equals(pago.getEstado())) {
-
-            pago.setEstado("ReembolsoPendiente");
-            pagoRepository.save(pago);
-        }
+        // El servicio de pedidos ya no modifica pagos directamente
+        pagoEstadoService.marcarReembolsoPendiente(
+                pedido.getId());
 
         pedido.setEstado("Cancelado");
     }

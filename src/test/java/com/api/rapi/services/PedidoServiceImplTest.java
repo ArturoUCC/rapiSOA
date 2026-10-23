@@ -17,12 +17,10 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import com.api.rapi.events.PedidoEventPublisher;
 import com.api.rapi.models.ClienteModel;
-import com.api.rapi.models.PagoModel;
 import com.api.rapi.models.PedidoModel;
 import com.api.rapi.models.RestauranteModel;
 
 import com.api.rapi.repositories.ClienteRepository;
-import com.api.rapi.repositories.PagoRepository;
 import com.api.rapi.repositories.PedidoRepository;
 import com.api.rapi.repositories.RestauranteRepository;
 
@@ -39,7 +37,7 @@ public class PedidoServiceImplTest {
     private RestauranteRepository restauranteRepository;
 
     @Mock
-    private PagoRepository pagoRepository;
+    private PagoEstadoService pagoEstadoService;
 
     @Mock
     private PedidoEventPublisher eventPublisher;
@@ -100,7 +98,10 @@ public class PedidoServiceImplTest {
         assertEquals(1L, resultado.getId());
 
         verify(eventPublisher).publicarEvento(
-                1L, 1L, "PEDIDO_CREADO", "PendientePago");
+                1L,
+                1L,
+                "PEDIDO_CREADO",
+                "PendientePago");
     }
 
     @Test
@@ -129,16 +130,16 @@ public class PedidoServiceImplTest {
     @Test
     void debeConfirmarPagoRegistrado() {
 
-        PagoModel pago = new PagoModel();
-        pago.setEstado("Confirmado");
-        pago.setPedido(pedido);
-        pago.setMonto(new BigDecimal("250.00"));
-
         when(pedidoRepository.findById(1L))
                 .thenReturn(Optional.of(pedido));
 
-        when(pagoRepository.findByPedidoId(1L))
-                .thenReturn(Optional.of(pago));
+        // El servicio de pagos valida el estado y monto.
+        // Al no lanzar excepcion, la validacion es exitosa.
+        doNothing()
+                .when(pagoEstadoService)
+                .validarPagoConfirmado(
+                        1L,
+                        new BigDecimal("250.00"));
 
         when(pedidoRepository.save(any(PedidoModel.class)))
                 .thenAnswer(invocacion ->
@@ -153,6 +154,10 @@ public class PedidoServiceImplTest {
 
         assertNotNull(resultado.getFechaLimiteAceptacion());
 
+        verify(pagoEstadoService).validarPagoConfirmado(
+                1L,
+                new BigDecimal("250.00"));
+
         verify(eventPublisher).publicarEvento(
                 1L,
                 1L,
@@ -163,14 +168,16 @@ public class PedidoServiceImplTest {
     @Test
     void noDebeConfirmarPagoSinVerificacion() {
 
-        PagoModel pago = new PagoModel();
-        pago.setEstado("Pendiente");
-
         when(pedidoRepository.findById(1L))
                 .thenReturn(Optional.of(pedido));
 
-        when(pagoRepository.findByPedidoId(1L))
-                .thenReturn(Optional.of(pago));
+        // Simular que PagoEstadoService rechaza el pago.
+        doThrow(new IllegalStateException(
+                "El pago todavia no esta confirmado"))
+                .when(pagoEstadoService)
+                .validarPagoConfirmado(
+                        1L,
+                        new BigDecimal("250.00"));
 
         assertThrows(
                 IllegalStateException.class,
@@ -179,6 +186,13 @@ public class PedidoServiceImplTest {
 
         verify(pedidoRepository, never())
                 .save(any(PedidoModel.class));
+
+        verify(eventPublisher, never())
+                .publicarEvento(
+                        any(),
+                        any(),
+                        any(),
+                        any());
     }
 
     @Test
@@ -196,7 +210,13 @@ public class PedidoServiceImplTest {
 
         assertEquals("Cancelado", resultado.getEstado());
 
+        verify(pagoEstadoService, never())
+                .marcarReembolsoPendiente(any());
+
         verify(eventPublisher).publicarEvento(
-                1L, 1L, "PEDIDO_CANCELADO", "Cancelado");
+                1L,
+                1L,
+                "PEDIDO_CANCELADO",
+                "Cancelado");
     }
 }
